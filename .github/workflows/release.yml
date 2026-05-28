@@ -1,0 +1,101 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore + test
+        shell: pwsh
+        run: |
+          dotnet restore FlattenHere.sln
+          dotnet test FlattenHere.sln -c Release --nologo --verbosity minimal
+
+      - name: AOT publish
+        shell: pwsh
+        run: pwsh ./publish.ps1
+
+      - name: Stage release artifacts
+        id: stage
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag -or $tag -notmatch '^v\d') { $tag = 'dev' }
+
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+
+          $exe = Get-Item "src/bin/Release/net8.0-windows/win-x64/publish/FlattenHere.exe"
+          $sha = (Get-FileHash $exe.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          Copy-Item -Force $exe.FullName "artifacts/FlattenHere.exe"
+          Set-Content -Path "artifacts/FlattenHere.exe.sha256" -Value "$sha  FlattenHere.exe"
+
+          "exe=$($exe.FullName)"        | Out-File -Append $env:GITHUB_OUTPUT
+          "sha=$sha"                     | Out-File -Append $env:GITHUB_OUTPUT
+          "sizeKB=$([math]::Round($exe.Length/1KB, 1))" | Out-File -Append $env:GITHUB_OUTPUT
+          "tag=$tag"                     | Out-File -Append $env:GITHUB_OUTPUT
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatten-here-win-x64
+          path: artifacts/*
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/FlattenHere.exe
+            artifacts/FlattenHere.exe.sha256
+          body: |
+            ## flatten-here ${{ steps.stage.outputs.tag }}
+
+            Native AOT single exe, `${{ steps.stage.outputs.sizeKB }}` KB.
+            No .NET runtime to install, no PowerShell required.
+
+            **SHA-256** (`FlattenHere.exe`): `${{ steps.stage.outputs.sha }}`
+
+            ### Install (per-user, no admin)
+
+            1. Download `FlattenHere.exe` from this release.
+            2. Double-click it. A "flatten-here installer" dialog appears.
+            3. Click **Install for current user**.
+            4. Right-click any folder and pick **Flatten files here**.
+               Hold Ctrl for dry-run, Shift to also remove emptied subfolders.
+
+            Uninstall: double-click the same exe again. The dialog will detect
+            the existing install and offer Uninstall / Reinstall.
+
+            ### SmartScreen note
+
+            The exe is unsigned. On first launch Windows may show "Windows
+            protected your PC". Click **More info**, then **Run anyway**.
+            Verify the SHA-256 above against your download if you want extra
+            certainty.
+
+            ### Command-line use
+
+            ```powershell
+            FlattenHere.exe --install                       # interactive installer dialog
+            FlattenHere.exe --install --quiet               # silent install, current user
+            FlattenHere.exe --install --machine --quiet     # silent machine install (admin)
+            FlattenHere.exe --uninstall --quiet             # silent uninstall
+            FlattenHere.exe --path "D:\Photos" --dry-run    # one-off flatten preview
+            ```
